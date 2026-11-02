@@ -1,0 +1,908 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#070b18">
+<meta name="description" content="Jet Dodge — hold to thrust, release to fall. Dodge laser walls, rotating turrets and tracking missiles in an endless night-city run. Free HTML5 game.">
+<title>Jet Dodge</title>
+<script>
+// 平台 SDK 按域名条件加载（独立运行时完全不加载，游戏行为不变）
+(function () {
+  var host = location.hostname || "";
+  try {
+    if (host.indexOf("crazygames") !== -1) {
+      var s1 = document.createElement("script");
+      s1.src = "https://sdk.crazygames.com/crazygames-sdk-v3.js";
+      s1.onload = function () {
+        if (window.CrazyGames && window.CrazyGames.SDK) {
+          window.CrazyGames.SDK.init().then(function () {
+            try { window.CrazyGames.SDK.game.loadingStart(); } catch (e) {}
+            window.addEventListener("load", function () { try { window.CrazyGames.SDK.game.loadingStop(); } catch (e) {} });
+          }).catch(function () {});
+        }
+      };
+      document.head.appendChild(s1);
+      window.__portal = "crazygames";
+    } else if (host.indexOf("gamedistribution") !== -1 || host.indexOf("html5.gamedistribution.com") !== -1 || host.indexOf("gd.games") !== -1) {
+      var s2 = document.createElement("script");
+      s2.src = "https://sdk.gamedistribution.com/v2/main.min.js";
+      document.head.appendChild(s2);
+      window.__portal = "gamedistribution";
+    }
+  } catch (e) {}
+})();
+</script>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { height:100%; overflow:hidden; background:#05070f; font-family:-apple-system,"Segoe UI",Roboto,Arial,sans-serif; }
+  #wrap { height:100%; display:flex; align-items:center; justify-content:center; }
+  #stage { position:relative; }
+  canvas { display:block; touch-action:none; border-radius:10px; background:#070b18; }
+  #muteBtn { position:absolute; top:10px; right:10px; z-index:6; background:rgba(20,28,52,.8); color:#9fb4e8;
+    border:1px solid #2c3a66; border-radius:999px; padding:5px 12px; font-size:11px; font-weight:700;
+    letter-spacing:1px; cursor:pointer; font-family:inherit; }
+  #muteBtn.off { color:#5b678c; border-color:#26304f; }
+  #overlay { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    background:rgba(4,7,16,.62); z-index:5; }
+  #panel { background:#101830; border:1px solid #2a3860; border-radius:18px; padding:26px 34px;
+    text-align:center; color:#fff; max-width:86%; box-shadow:0 10px 40px rgba(0,0,0,.5); }
+  #panel h1 { font-size:26px; letter-spacing:3px; margin-bottom:4px; color:#7ee0ff; }
+  #panel h2 { font-size:22px; margin-bottom:6px; }
+  #panel p { color:#9aa8cc; font-size:13px; line-height:1.65; margin-bottom:10px; }
+  #panel p b { color:#ffd76a; font-weight:700; }
+  #panel .final { font-size:36px; font-weight:900; color:#ffd76a; margin:8px 0 4px; }
+  #panel .sub { color:#8a96bc; font-size:12px; margin-bottom:14px; }
+  #panel .newbest { color:#7effb0; font-size:13px; font-weight:800; letter-spacing:1px; margin-bottom:10px; display:none; }
+  #mainBtn { background:linear-gradient(135deg,#20c4ff,#7b5bff); color:#fff; border:none; border-radius:12px;
+    padding:12px 42px; font-size:16px; font-weight:800; letter-spacing:1px; cursor:pointer; font-family:inherit; }
+  #mainBtn:active { transform:scale(.97); }
+  #footer { position:absolute; bottom:6px; left:0; right:0; text-align:center; color:#3d4665; font-size:10px;
+    letter-spacing:1px; pointer-events:none; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="stage">
+    <canvas id="game"></canvas>
+    <button id="muteBtn">SOUND ON</button>
+    <div id="overlay"><div id="panel">
+      <h1 id="ovTitle">JET DODGE</h1>
+      <p id="ovText"><b>HOLD</b> to thrust &mdash; <b>RELEASE</b> to fall.<br>
+        Thread the gaps in the laser walls.<br>
+        Graze hazards for <b>NEAR MISS +2</b>.</p>
+      <div class="final" id="finalScore" style="display:none">0</div>
+      <div class="newbest" id="newBest">&#9733; NEW BEST! &#9733;</div>
+      <div class="sub" id="ovBest"></div>
+      <button id="mainBtn">PLAY</button>
+    </div></div>
+    <div id="footer">JET DODGE &mdash; A FREE ARCADE GAME</div>
+  </div>
+</div>
+<script>
+"use strict";
+/* ============ 纯逻辑层：无 DOM / Canvas / Audio，可在 node vm 中直接运行 ============
+   坐标系：竖屏巷道，世界向左卷动（卷速随时间上升）。喷气人横坐标固定，按住喷气上升、
+   松开重力下坠，只控制高度躲开：竖直激光墙（留缺口）、旋转激光炮塔、跟踪导弹。 */
+var JD = (function () {
+  var W = 480, H = 720;              // 逻辑分辨率（竖屏优先）
+  var PX = 130;                      // 玩家固定横坐标
+  var PR = 13;                       // 玩家碰撞半径
+  var PX_PER_M = 10;                 // 10px = 1 米
+  var NEAR_PX = 30;                  // near-miss 表面距离阈值
+  var GRAV = 1450, THRUST = 2950, VMAX = 620;  // 纵向物理（按住净加速 1500 向上）
+  var TOP = 26, BOT = H - 26;        // 巷道上下界（安全，贴边滑动）
+  var WALL_TH = 14, BEAM_R = 5;      // 激光墙厚 / 光束半径
+  var MISSILE_R = 10;
+  var MISSILE_HOME = 4;              // 导弹跟踪 4 秒后直飞
+  var MISSILE_TURN = 3.3;            // 导弹转向率（rad/s），急变向可甩掉
+  var MISSILE_MAXAGE = 7.5;          // 导弹寿命上限（s）
+  var MIN_SPACING = 260;             // 相邻障碍最小间距
+  var SPAWN_X = W + 60;              // 障碍生成横坐标（屏幕外）
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+
+  /* ---- 几何原语（测试用独立实现比对） ---- */
+  // 点到矩形表面距离（矩形内部为 0）
+  function pointRect(px, py, x, y, w, h) {
+    var dx = Math.max(x - px, 0, px - (x + w));
+    var dy = Math.max(y - py, 0, py - (y + h));
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+  // 点到线段距离
+  function pointSeg(px, py, ax, ay, bx, by) {
+    var abx = bx - ax, aby = by - ay;
+    var len2 = abx * abx + aby * aby;
+    var t = len2 ? ((px - ax) * abx + (py - ay) * aby) / len2 : 0;
+    t = clamp(t, 0, 1);
+    var dx = px - (ax + abx * t), dy = py - (ay + aby * t);
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  /* ---- 危险物判定：返回表面距离 d（d<=0 碰撞；0<d<=NEAR_PX 为 near-miss） ---- */
+  // gate：竖直激光墙，上下两段，中间留缺口（gap），玩家控制高度从缺口穿过
+  function evalHazard(hz, px, py, pr) {
+    var d = Infinity, i, dx, dy, n, a, bx, by;
+    if (hz.type === "gate") {
+      var g1 = hz.gc - hz.gapH / 2, g2 = hz.gc + hz.gapH / 2;
+      d = Math.min(
+        pointRect(px, py, hz.x, 0, WALL_TH, g1),
+        pointRect(px, py, hz.x, g2, WALL_TH, H - g2)
+      ) - pr;
+    } else if (hz.type === "turret") {
+      dx = px - hz.x; dy = py - hz.y;
+      d = Math.sqrt(dx * dx + dy * dy) - hz.hubR - pr;
+      n = hz.beams || 2;
+      for (i = 0; i < n; i++) {
+        a = hz.ang + i * (Math.PI * 2 / n);
+        bx = hz.x + Math.cos(a) * hz.L; by = hz.y + Math.sin(a) * hz.L;
+        d = Math.min(d, pointSeg(px, py, hz.x, hz.y, bx, by) - BEAM_R - pr);
+      }
+    } else if (hz.type === "missile") {
+      dx = px - hz.x; dy = py - hz.y;
+      d = Math.sqrt(dx * dx + dy * dy) - MISSILE_R - pr;
+    }
+    return { d: d, hit: d <= 0, near: d > 0 && d <= NEAR_PX };
+  }
+
+  function createState() {
+    return {
+      W: W, H: H,
+      time: 0, dist: 0, score: 0, bonus: 0, nearCount: 0,
+      sy: H * 0.5, sv: 0, thrusting: false,
+      scrollS: 150, diff: 0,
+      slowmo: 0, shield: false, invuln: 0,
+      dead: false, deadT: 0,
+      obstacles: [], missiles: [], pickups: [],
+      distSince: 0, nextSpacing: 430, prevGc: H / 2,
+      missileCd: 3, nextShield: 800,
+      events: [], nextId: 1
+    };
+  }
+
+  function spawnObstacle(st) {
+    var d = st.diff, id = st.nextId++;
+    var type = "gate";
+    if (st.time > 6 && Math.random() < 0.16 + 0.14 * d) type = "turret";
+    if (type === "gate") {
+      var gapH = clamp(176 - 50 * d, 128, 176) * rand(0.94, 1.06);
+      // 缺口中心位移上限随卷速收紧，保证纵向可达
+      var maxShift = Math.min(0.6 * st.nextSpacing * 520 / st.scrollS, 420);
+      var gc = clamp(st.prevGc + rand(-1, 1) * maxShift, TOP + gapH / 2 + 22, BOT - gapH / 2 - 22);
+      st.obstacles.push({ type: "gate", id: id, x: SPAWN_X, gc: gc, gapH: gapH, nearDone: false });
+      st.prevGc = gc;
+    } else {
+      var topSide = Math.random() < 0.5;
+      var hy = topSide ? 64 : H - 64;
+      var beams = (d > 0.55 && Math.random() < 0.4) ? 4 : 2;
+      var L = 150 + 46 * d; if (beams === 4) L *= 0.82;
+      st.obstacles.push({ type: "turret", id: id, x: SPAWN_X, y: hy, ang: rand(0, Math.PI * 2),
+        om: (1.5 + 1.7 * d) * (Math.random() < 0.5 ? -1 : 1) * (beams === 4 ? 0.85 : 1),
+        L: L, beams: beams, hubR: 21, nearDone: false });
+    }
+  }
+
+  function hitPlayer(st, d, id) {
+    if (st.shield) {
+      st.shield = false;
+      st.invuln = 1.2;             // 护盾抵挡一次 + 短暂无敌
+      st.events.push({ type: "shieldbreak", x: PX, y: st.sy });
+    } else {
+      st.dead = true;
+      st.deadT = 0;
+      st.events.push({ type: "dead", x: PX, y: st.sy, d: d, id: id });
+    }
+  }
+
+  function step(st, input, dtG, dtR) {
+    // dt 上限：防切后台后瞬移
+    dtG = Math.min(dtG, 1 / 30); dtR = Math.min(dtR, 1 / 30);
+    if (st.dead) { st.deadT += dtR; return; }
+    if (st.slowmo > 0) st.slowmo = Math.max(0, st.slowmo - dtR);
+    if (st.invuln > 0) st.invuln = Math.max(0, st.invuln - dtG);
+    var thrust = !!(input && input.thrust);
+    var i, hz, m;
+
+    /* ---- 难度与卷动 ---- */
+    st.time += dtG;
+    st.diff = Math.min(1, st.dist / 16000);
+    st.scrollS = 150 + 195 * st.diff;
+    var S = st.scrollS;
+
+    /* ---- 玩家物理（sv 向下为正） ---- */
+    var sv = st.sv + GRAV * dtG;
+    if (thrust) sv -= THRUST * dtG;
+    st.sv = clamp(sv, -VMAX, VMAX);
+    var sy = st.sy + st.sv * dtG;
+    if (sy < TOP) { sy = TOP; if (st.sv < 0) st.sv = 0; }
+    if (sy > BOT) { sy = BOT; if (st.sv > 0) st.sv = 0; }
+    st.sy = sy;
+    st.thrusting = thrust;
+
+    /* ---- 里程 / 高度 ---- */
+    st.dist += S * dtG;
+
+    /* ---- 障碍左移与离场 ---- */
+    for (i = st.obstacles.length - 1; i >= 0; i--) {
+      hz = st.obstacles[i];
+      hz.x -= S * dtG;
+      if (hz.type === "turret") hz.ang += hz.om * dtG;
+      if (hz.x < -260) st.obstacles.splice(i, 1);
+    }
+
+    /* ---- 障碍生成（按卷动里程调度，保证横向间距） ---- */
+    st.distSince += S * dtG;
+    st.nextSpacing = clamp(430 - 130 * st.diff, 300, 430) + rand(0, 60);
+    if (st.distSince >= st.nextSpacing) {
+      st.distSince = 0;
+      spawnObstacle(st);
+      st.events.push({ type: "spawn" });
+    }
+
+    /* ---- 道具 ---- */
+    for (i = st.pickups.length - 1; i >= 0; i--) {
+      var pk = st.pickups[i];
+      pk.x -= S * dtG; pk.t += dtG;
+      if (pk.x < -40) { st.pickups.splice(i, 1); continue; }
+      var pdx = pk.x - PX, pdy = pk.y - st.sy, pr2 = PR + 17;
+      if (pdx * pdx + pdy * pdy < pr2 * pr2) {
+        st.pickups.splice(i, 1);
+        if (st.shield) { st.bonus += 10; st.events.push({ type: "shieldbonus", x: pk.x, y: pk.y }); }
+        else { st.shield = true; st.events.push({ type: "shieldget", x: pk.x, y: pk.y }); }
+      }
+    }
+
+    /* ---- 导弹：侧边警告 -> 跟踪 4s -> 直飞；出界或寿命终止即移除 ---- */
+    for (i = st.missiles.length - 1; i >= 0; i--) {
+      m = st.missiles[i];
+      m.age += dtG;
+      if (m.phase === "warn") {
+        m.t -= dtG;
+        m.y = clamp(st.sy, TOP, BOT); // 锁定阶段跟随玩家
+        if (m.t <= 0) {
+          m.phase = "fly"; m.age = 0; m.nearDone = false;
+          m.x = m.side < 0 ? -24 : W + 24;
+          var sp = 295 + 70 * st.diff;
+          var ty = clamp(st.sy + st.sv * 0.4, TOP, BOT); // 预判航向
+          var a0 = Math.atan2(ty - m.y, PX - m.x);
+          m.vx = Math.cos(a0) * sp; m.vy = Math.sin(a0) * sp; m.sp = sp;
+        }
+      } else {
+        if (m.age < MISSILE_HOME) { // 有限转向率追踪
+          var want = Math.atan2(st.sy - m.y, PX - m.x);
+          var cur = Math.atan2(m.vy, m.vx);
+          var dd = want - cur;
+          while (dd > Math.PI) dd -= Math.PI * 2;
+          while (dd < -Math.PI) dd += Math.PI * 2;
+          var turn = clamp(dd, -MISSILE_TURN * dtG, MISSILE_TURN * dtG);
+          cur += turn;
+          m.vx = Math.cos(cur) * m.sp; m.vy = Math.sin(cur) * m.sp;
+        }
+        m.x += m.vx * dtG; m.y += m.vy * dtG;
+        if (m.x < -90 || m.x > W + 90 || m.y < -90 || m.y > H + 90 || m.age > MISSILE_MAXAGE) {
+          st.missiles.splice(i, 1);
+          st.missileCd = rand(4, 6.5) - st.diff; // 移除后冷却，下一枚
+        }
+      }
+    }
+    if (st.missiles.length === 0 && st.score >= 40) {
+      st.missileCd -= dtG;
+      if (st.missileCd <= 0) {
+        st.missiles.push({ phase: "warn", t: 0.8, side: Math.random() < 0.5 ? -1 : 1, y: st.sy, age: 0 });
+        st.events.push({ type: "alarm" });
+      }
+    }
+
+    /* ---- 分数：高度 10m=1 分 + near miss 2 分 + 奖励 ---- */
+    st.score = Math.floor(st.dist / (PX_PER_M * 10)) + st.nearCount * 2 + st.bonus;
+
+    /* ---- 护盾补给：每 800 分一个 ---- */
+    while (st.score >= st.nextShield) {
+      st.nextShield += 800;
+      var px2 = SPAWN_X;
+      for (var k = 0; k < st.obstacles.length; k++) { // 避免刷在障碍里
+        if (Math.abs(st.obstacles[k].x - px2) < 100) px2 = Math.max(px2, st.obstacles[k].x) + 130;
+      }
+      st.pickups.push({ x: px2, y: rand(80, H - 80), t: 0 });
+    }
+
+    /* ---- 碰撞与 near-miss（使用 evalHazard，与几何参照一致） ---- */
+    if (st.invuln <= 0) {
+      for (i = 0; i < st.obstacles.length; i++) {
+        hz = st.obstacles[i];
+        var res = evalHazard(hz, PX, st.sy, PR);
+        if (res.hit) { hitPlayer(st, res.d, hz.id); break; }
+        if (res.near && !hz.nearDone) {
+          hz.nearDone = true;
+          st.nearCount++;
+          st.slowmo = 0.2; // 慢动作 0.2 秒
+          st.events.push({ type: "near", x: PX, y: st.sy, d: res.d, id: hz.id });
+        }
+      }
+      if (!st.dead) {
+        for (i = st.missiles.length - 1; i >= 0; i--) {
+          m = st.missiles[i];
+          if (m.phase !== "fly") continue;
+          var mdx = m.x - PX, mdy = m.y - st.sy;
+          var md = Math.sqrt(mdx * mdx + mdy * mdy) - MISSILE_R - PR;
+          if (md <= 0) {
+            hitPlayer(st, md, "m" + i);
+            if (st.invuln > 0) st.missiles.splice(i, 1); // 护盾挡下导弹
+            break;
+          }
+          if (md <= NEAR_PX && !m.nearDone) {
+            m.nearDone = true;
+            st.nearCount++;
+            st.slowmo = 0.2;
+            st.events.push({ type: "near", x: m.x, y: m.y, d: md, id: "m" + i });
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    CONST: { W: W, H: H, PX: PX, PR: PR, NEAR_PX: NEAR_PX, TOP: TOP, BOT: BOT, GRAV: GRAV, THRUST: THRUST,
+      VMAX: VMAX, WALL_TH: WALL_TH, BEAM_R: BEAM_R, MISSILE_R: MISSILE_R, MISSILE_HOME: MISSILE_HOME,
+      MISSILE_TURN: MISSILE_TURN, MISSILE_MAXAGE: MISSILE_MAXAGE, MIN_SPACING: MIN_SPACING, PX_PER_M: PX_PER_M,
+      SPAWN_X: SPAWN_X },
+    createState: createState,
+    step: step,
+    evalHazard: evalHazard,
+    pointRect: pointRect,
+    pointSeg: pointSeg,
+    clamp: clamp
+  };
+})();
+if (typeof window !== "undefined") window.JD = JD;
+</script>
+<script>
+"use strict";
+/* ============ UI 层：渲染 / 音效 / 输入 / 平台事件 ============ */
+var C = JD.CONST, W = C.W, H = C.H;
+var canvas = document.getElementById("game");
+var ctx = canvas.getContext("2d");
+var stage = document.getElementById("stage");
+var overlay = document.getElementById("overlay");
+var muteBtn = document.getElementById("muteBtn");
+
+var state = "ready"; // ready | play | over
+var st = JD.createState();
+var uiTime = 0, shakeT = 0, overlayShown = false, newBest = false, beatBest = false;
+var particles = [], floats = [], rings = [];
+var best = 0;
+try { best = parseInt(localStorage.getItem("jd_best") || "0", 10) || 0; } catch (e) {}
+
+/* ---- 自适应（竖屏优先，窗口内等比缩放） ---- */
+var scaleF = 1;
+function fit() {
+  var s = Math.min(window.innerWidth / W, window.innerHeight / H);
+  var cw = Math.max(200, Math.floor(W * s)), chh = Math.max(300, Math.floor(H * s));
+  stage.style.width = cw + "px"; stage.style.height = chh + "px";
+  canvas.style.width = cw + "px"; canvas.style.height = chh + "px";
+  var dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.round(cw * dpr); canvas.height = Math.round(chh * dpr);
+  scaleF = canvas.width / W;
+}
+window.addEventListener("resize", fit);
+window.addEventListener("orientationchange", fit);
+fit();
+
+/* ---- 音效：全部 WebAudio 合成 ---- */
+var AC = window.AudioContext || window.webkitAudioContext;
+var actx = null, master = null, jetGain = null, muted = false, alarmT = 0;
+try { muted = localStorage.getItem("jd_mute") === "1"; } catch (e) {}
+function initAudio() {
+  if (actx || !AC) return;
+  try {
+    actx = new AC();
+    master = actx.createGain();
+    master.gain.value = muted ? 0 : 1;
+    master.connect(actx.destination);
+    var len = actx.sampleRate, buf = actx.createBuffer(1, len, actx.sampleRate), ch = buf.getChannelData(0);
+    for (var i = 0; i < len; i++) ch[i] = Math.random() * 2 - 1;
+    var src = actx.createBufferSource(); src.buffer = buf; src.loop = true;
+    var filt = actx.createBiquadFilter(); filt.type = "bandpass"; filt.frequency.value = 640; filt.Q.value = 0.7;
+    jetGain = actx.createGain(); jetGain.gain.value = 0;
+    src.connect(filt); filt.connect(jetGain); jetGain.connect(master);
+    src.start();
+  } catch (e) { actx = null; }
+}
+function resumeAudio() { try { if (actx && actx.state === "suspended") actx.resume(); } catch (e) {} }
+function setJet(on) {
+  if (!actx || !jetGain) return;
+  try {
+    var t = actx.currentTime;
+    jetGain.gain.cancelScheduledValues(t);
+    jetGain.gain.setTargetAtTime(on ? 0.16 : 0, t, 0.06);
+  } catch (e) {}
+}
+function beep(freq, dur, type, gainv, slideTo, delay) {
+  if (!actx) return;
+  try {
+    var t0 = actx.currentTime + (delay || 0);
+    var o = actx.createOscillator(), g = actx.createGain();
+    o.type = type || "sine";
+    o.frequency.setValueAtTime(freq, t0);
+    if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t0 + dur);
+    g.gain.setValueAtTime(gainv || 0.1, t0);
+    g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+    o.connect(g); g.connect(master);
+    o.start(t0); o.stop(t0 + dur);
+  } catch (e) {}
+}
+function noiseBurst(dur, gainv, freq) {
+  if (!actx) return;
+  try {
+    var n = Math.floor(actx.sampleRate * dur), buf = actx.createBuffer(1, n, actx.sampleRate), ch = buf.getChannelData(0);
+    for (var i = 0; i < n; i++) ch[i] = (Math.random() * 2 - 1) * (1 - i / n);
+    var src = actx.createBufferSource(); src.buffer = buf;
+    var filt = actx.createBiquadFilter(); filt.type = "lowpass"; filt.frequency.value = freq || 1200;
+    var g = actx.createGain(); g.gain.value = gainv || 0.2;
+    src.connect(filt); filt.connect(g); g.connect(master);
+    src.start();
+  } catch (e) {}
+}
+function updateMuteBtn() {
+  muteBtn.textContent = muted ? "SOUND OFF" : "SOUND ON";
+  muteBtn.className = muted ? "off" : "";
+}
+muteBtn.addEventListener("click", function (e) {
+  e.stopPropagation();
+  muted = !muted;
+  try { localStorage.setItem("jd_mute", muted ? "1" : "0"); } catch (e2) {}
+  if (master) { try { master.gain.value = muted ? 0 : 1; } catch (e2) {} }
+  updateMuteBtn();
+});
+updateMuteBtn();
+
+/* ---- 平台埋点：仅 crazygames 域（SDK 加载器已做域名守卫） ---- */
+function sdkStart() {
+  try {
+    if (window.__portal === "crazygames" && window.CrazyGames && window.CrazyGames.SDK) {
+      window.CrazyGames.SDK.game.gameplayStart();
+    }
+  } catch (e) {}
+}
+function sdkStop() {
+  try {
+    if (window.__portal === "crazygames" && window.CrazyGames && window.CrazyGames.SDK) {
+      window.CrazyGames.SDK.game.gameplayStop();
+      window.CrazyGames.SDK.game.happytime();
+    }
+  } catch (e) {}
+}
+
+/* ---- 流程 ---- */
+function startGame() {
+  st = JD.createState();
+  state = "play";
+  overlayShown = false; newBest = false; beatBest = false;
+  particles.length = 0; floats.length = 0; rings.length = 0; shakeT = 0;
+  overlay.style.display = "none";
+  sdkStart();
+}
+function showOverPanel() {
+  document.getElementById("ovTitle").textContent = "GAME OVER";
+  document.getElementById("ovText").style.display = "none";
+  var fs = document.getElementById("finalScore");
+  fs.style.display = "block"; fs.textContent = st.score;
+  document.getElementById("newBest").style.display = newBest ? "block" : "none";
+  document.getElementById("ovBest").textContent = "BEST " + best;
+  document.getElementById("mainBtn").textContent = "RETRY";
+  overlay.style.display = "flex";
+}
+document.getElementById("mainBtn").addEventListener("click", function (e) {
+  e.stopPropagation();
+  initAudio(); resumeAudio();
+  if (state !== "play") startGame();
+});
+
+/* ---- 输入：触屏按住任意处 + 鼠标按住 + 空格 ---- */
+var touchHeld = false, mouseHeld = false, keyHeld = false;
+function held() { return touchHeld || mouseHeld || keyHeld; }
+function press() {
+  initAudio(); resumeAudio();
+  if (state === "ready") startGame();
+  else if (state === "over" && st.deadT > 0.6) startGame();
+}
+stage.addEventListener("touchstart", function (e) {
+  if (e.target && e.target.id === "muteBtn") return;
+  e.preventDefault();
+  touchHeld = true; press();
+}, { passive: false });
+stage.addEventListener("touchend", function (e) {
+  e.preventDefault();
+  if (e.touches.length === 0) touchHeld = false;
+}, { passive: false });
+stage.addEventListener("touchcancel", function () { touchHeld = false; }, { passive: false });
+stage.addEventListener("mousedown", function (e) {
+  if (e.target && e.target.id === "muteBtn") return;
+  mouseHeld = true; press();
+});
+window.addEventListener("mouseup", function () { mouseHeld = false; });
+document.addEventListener("keydown", function (e) {
+  if (e.code === "Space" || e.key === " ") {
+    e.preventDefault();
+    if (e.repeat) return;
+    keyHeld = true; press();
+  }
+});
+document.addEventListener("keyup", function (e) {
+  if (e.code === "Space" || e.key === " ") keyHeld = false;
+});
+stage.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+window.addEventListener("blur", function () { touchHeld = mouseHeld = keyHeld = false; setJet(false); });
+document.addEventListener("visibilitychange", function () {
+  if (document.hidden) { touchHeld = mouseHeld = keyHeld = false; setJet(false); }
+});
+
+/* ---- 特效 ---- */
+function puff(x, y, n, colors, spd, up) {
+  for (var i = 0; i < n; i++) {
+    var a = Math.random() * Math.PI * 2, s = (0.3 + Math.random() * 0.7) * spd;
+    particles.push({ x: x, y: y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - (up || 0),
+      life: 0.3 + Math.random() * 0.45, max: 0.75, color: colors[(Math.random() * colors.length) | 0],
+      size: 2 + Math.random() * 3 });
+  }
+}
+function floatText(x, y, text, color) { floats.push({ x: x, y: y, text: text, life: 0.9, color: color || "#fff" }); }
+
+function drainEvents() {
+  for (var i = 0; i < st.events.length; i++) {
+    var ev = st.events[i];
+    if (ev.type === "near") {
+      floatText(ev.x + 10, ev.y - 22, "NEAR MISS +2", "#7ee0ff");
+      beep(1450, 0.09, "sine", 0.12, 2300);
+    } else if (ev.type === "shieldget") {
+      floatText(ev.x, ev.y - 20, "SHIELD", "#7effb0");
+      beep(620, 0.09, "triangle", 0.12); beep(930, 0.1, "triangle", 0.1, 0, 0.09);
+      puff(ev.x, ev.y, 10, ["#7effb0", "#d0ffe6"], 90, 0);
+    } else if (ev.type === "shieldbonus") {
+      floatText(ev.x, ev.y - 20, "+10", "#ffd76a");
+      beep(880, 0.08, "triangle", 0.1);
+    } else if (ev.type === "shieldbreak") {
+      floatText(C.PX, st.sy - 30, "SHIELD DOWN", "#ff8a9b");
+      noiseBurst(0.2, 0.22, 1800);
+      beep(240, 0.2, "square", 0.1, 90);
+      shakeT = 0.25;
+    } else if (ev.type === "alarm") {
+      // 警报由帧循环按节拍鸣叫
+    } else if (ev.type === "dead") {
+      state = "over";
+      setJet(false);
+      sdkStop();
+      shakeT = 0.5;
+      puff(C.PX, st.sy, 42, ["#ffd76a", "#ff8a3c", "#ff4d5e", "#fff"], 260, 60);
+      rings.push({ x: C.PX, y: st.sy, r: 6, life: 0.55 });
+      noiseBurst(0.5, 0.3, 900);
+      beep(300, 0.55, "sawtooth", 0.14, 52);
+      if (st.score > best) {
+        best = st.score; newBest = true;
+        try { localStorage.setItem("jd_best", String(best)); } catch (e2) {}
+      }
+    }
+  }
+  st.events.length = 0;
+}
+
+/* ---- 背景：星空 + 底部城市剪影双层视差（离屏程序化贴图，横向无缝循环） ---- */
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    var t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function makeSkyline(seed, base, line, winA, winB) {
+  var tileW = W, hgt = 260, c = document.createElement("canvas");
+  c.width = tileW; c.height = hgt;
+  var g = c.getContext("2d"), rng = mulberry32(seed);
+  var colW = 30;
+  for (var bx = 0; bx < tileW; bx += colW) { // 每列一栋楼，自底向上，高度随机（横向无缝循环）
+    var bh = 40 + Math.floor(rng() * (hgt - 60));
+    var bw = colW - 3;
+    g.fillStyle = base; g.fillRect(bx, hgt - bh, bw, bh);
+    g.fillStyle = line; g.fillRect(bx, hgt - bh, bw, 2);
+    if (rng() < 0.4) { g.fillStyle = line; g.fillRect(bx + bw / 2 - 1, hgt - bh - 10, 2, 10); } // 天线
+    for (var wy = hgt - bh + 6; wy < hgt - 8; wy += 10) {
+      for (var wx = bx + 4; wx < bx + bw - 5; wx += 9) {
+        if (rng() < 0.22) {
+          g.globalAlpha = 0.3 + rng() * 0.5;
+          g.fillStyle = rng() < 0.72 ? winA : winB;
+          g.fillRect(wx, wy, 3, 4);
+        }
+      }
+    }
+    g.globalAlpha = 1;
+  }
+  return c;
+}
+var cityFar = makeSkyline(20240117, "#0b1022", "#141c38", "#ffb45e", "#9fd6ff");
+var cityNear = makeSkyline(90210431, "#0e152b", "#1b2547", "#ffc47e", "#8fd0ff");
+var stars = [];
+(function () {
+  var rng = mulberry32(777);
+  for (var i = 0; i < 70; i++) stars.push({ x: rng() * W, y: rng() * (H - 220), r: 0.6 + rng() * 1.3, tw: 1.5 + rng() * 3.5, ph: rng() * 6.28 });
+})();
+function drawSkyline(img, off, yBase) {
+  var p = ((off % img.width) + img.width) % img.width;
+  ctx.drawImage(img, -p, yBase);
+  ctx.drawImage(img, img.width - p, yBase);
+}
+
+/* ---- 渲染 ---- */
+var bgGrad = null, vig = null;
+function render(scrollSrc, demo, dt) {
+  if (!bgGrad) {
+    bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+    bgGrad.addColorStop(0, "#070b18"); bgGrad.addColorStop(0.6, "#0a1024"); bgGrad.addColorStop(1, "#0d1329");
+    vig = ctx.createRadialGradient(W / 2, H / 2, H * 0.34, W / 2, H / 2, H * 0.72);
+    vig.addColorStop(0, "rgba(0,0,0,0)"); vig.addColorStop(1, "rgba(0,0,0,.42)");
+  }
+  ctx.setTransform(scaleF, 0, 0, scaleF, 0, 0);
+  if (shakeT > 0) {
+    var sm = shakeT * 12;
+    ctx.translate((Math.random() * 2 - 1) * sm, (Math.random() * 2 - 1) * sm);
+  }
+  ctx.fillStyle = bgGrad; ctx.fillRect(-8, -8, W + 16, H + 16);
+  // 星空
+  for (var si = 0; si < stars.length; si++) {
+    var s2 = stars[si];
+    var sxx = ((s2.x - scrollSrc * 0.03) % W + W) % W;
+    ctx.globalAlpha = 0.25 + 0.45 * Math.abs(Math.sin(uiTime * s2.tw + s2.ph));
+    ctx.fillStyle = "#cfe0ff";
+    ctx.fillRect(sxx, s2.y, s2.r, s2.r);
+  }
+  ctx.globalAlpha = 1;
+  // 城市剪影视差（底部天际线，随卷动左移）
+  drawSkyline(cityFar, scrollSrc * 0.10, H - 260);
+  drawSkyline(cityNear, scrollSrc * 0.26, H - 200);
+  ctx.fillStyle = "rgba(7,11,24,.25)"; ctx.fillRect(0, 0, W, H);
+
+  var i, hz, m;
+  // 道具
+  for (i = 0; i < st.pickups.length; i++) {
+    var pk = st.pickups[i];
+    var pxk = pk.x, pyk = pk.y + Math.sin(pk.t * 3) * 3;
+    ctx.save(); ctx.translate(pxk, pyk);
+    ctx.shadowColor = "#35e0ff"; ctx.shadowBlur = 14;
+    ctx.strokeStyle = "#35e0ff"; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.arc(0, 0, 14, 0, Math.PI * 2); ctx.stroke();
+    ctx.rotate(pk.t * 1.6);
+    ctx.strokeStyle = "rgba(160,240,255,.8)"; ctx.lineWidth = 2;
+    for (var seg = 0; seg < 3; seg++) { ctx.beginPath(); ctx.arc(0, 0, 9, seg * 2.1, seg * 2.1 + 1.2); ctx.stroke(); }
+    ctx.restore();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = "#c9f6ff"; ctx.beginPath(); ctx.arc(pxk, pyk, 4, 0, Math.PI * 2); ctx.fill();
+  }
+  // 激光墙：竖直两段，中间缺口
+  for (i = 0; i < st.obstacles.length; i++) {
+    hz = st.obstacles[i];
+    if (hz.type !== "gate") continue;
+    var g1 = hz.gc - hz.gapH / 2, g2 = hz.gc + hz.gapH / 2;
+    ctx.shadowColor = "#ff2d55"; ctx.shadowBlur = 16;
+    ctx.fillStyle = "#ff2d55";
+    ctx.fillRect(hz.x, -8, C.WALL_TH, g1 + 8); ctx.fillRect(hz.x, g2, C.WALL_TH, H - g2 + 8);
+    ctx.shadowBlur = 0;
+    // 缺口两侧白热芯线
+    ctx.fillStyle = "rgba(255,255,255,.85)";
+    ctx.fillRect(hz.x + C.WALL_TH - 3, -8, 3, g1 + 8); ctx.fillRect(hz.x + C.WALL_TH - 3, g2, 3, H - g2 + 8);
+    // 缺口内沿脉冲亮光（激光扫过亮光）
+    var pulse = 0.35 + 0.3 * Math.sin(uiTime * 9);
+    ctx.fillStyle = "rgba(255,120,145," + pulse + ")";
+    ctx.fillRect(hz.x - 3, g1 - 5, C.WALL_TH + 6, 5); ctx.fillRect(hz.x - 3, g2, C.WALL_TH + 6, 5);
+  }
+  // 旋转激光炮塔（锚定上下边）
+  for (i = 0; i < st.obstacles.length; i++) {
+    hz = st.obstacles[i];
+    if (hz.type !== "turret") continue;
+    ctx.save();
+    ctx.translate(hz.x, hz.y);
+    var nb = hz.beams || 2;
+    for (var bi = 0; bi < nb; bi++) {
+      var ba = hz.ang + bi * (Math.PI * 2 / nb);
+      var ex = Math.cos(ba) * hz.L, ey = Math.sin(ba) * hz.L;
+      var lg = ctx.createLinearGradient(0, 0, ex, ey);
+      lg.addColorStop(0, "rgba(255,60,94,.12)"); lg.addColorStop(1, "#ff3c5e");
+      ctx.strokeStyle = lg; ctx.lineWidth = 6; ctx.shadowColor = "#ff3c5e"; ctx.shadowBlur = 13;
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(ex, ey); ctx.stroke();
+      ctx.strokeStyle = "rgba(255,255,255,.9)"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(ex, ey); ctx.stroke();
+      ctx.fillStyle = "#ffd0d8";
+      ctx.beginPath(); ctx.arc(ex, ey, 3.4, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+    ctx.fillStyle = "#1a2138"; ctx.strokeStyle = "#33406e"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(0, 0, hz.hubR, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.shadowColor = "#ff2d55"; ctx.shadowBlur = 10;
+    ctx.fillStyle = "#ff4d66";
+    ctx.beginPath(); ctx.arc(0, 0, 7 + Math.sin(uiTime * 8) * 1.6, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  }
+  // 导弹
+  for (i = 0; i < st.missiles.length; i++) {
+    m = st.missiles[i];
+    if (m.phase === "warn") {
+      var blink = Math.sin(uiTime * 22) > 0 ? 0.95 : 0.25;
+      var wx = m.side < 0 ? 20 : W - 20;
+      ctx.globalAlpha = blink;
+      ctx.fillStyle = "#ff4d5e"; ctx.shadowColor = "#ff4d5e"; ctx.shadowBlur = 12;
+      ctx.beginPath();
+      if (m.side < 0) { ctx.moveTo(wx - 8, m.y - 9); ctx.lineTo(wx + 9, m.y); ctx.lineTo(wx - 8, m.y + 9); }
+      else { ctx.moveTo(wx + 8, m.y - 9); ctx.lineTo(wx - 9, m.y); ctx.lineTo(wx + 8, m.y + 9); }
+      ctx.closePath(); ctx.fill();
+      ctx.shadowBlur = 0; ctx.globalAlpha = 1;
+      ctx.fillStyle = "#fff"; ctx.font = "800 11px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText("!", wx, m.y + 0.5);
+    } else {
+      var ma = Math.atan2(m.vy, m.vx);
+      ctx.save(); ctx.translate(m.x, m.y); ctx.rotate(ma);
+      ctx.shadowColor = "#ffcf5c"; ctx.shadowBlur = 8;
+      ctx.fillStyle = "#cfd6e4"; ctx.fillRect(-11, -4.5, 18, 9);
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = "#ff4d5e";
+      ctx.beginPath(); ctx.moveTo(7, -4.5); ctx.lineTo(14, 0); ctx.lineTo(7, 4.5); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = "#8a93ad"; ctx.fillRect(-13, -6, 4, 12);
+      if (Math.sin(uiTime * 26) > 0) { ctx.fillStyle = "#ff4d5e"; ctx.beginPath(); ctx.arc(-9, 0, 2.4, 0, Math.PI * 2); ctx.fill(); }
+      ctx.restore();
+      if (Math.random() < 0.85) particles.push({ x: m.x - Math.cos(ma) * 13, y: m.y - Math.sin(ma) * 13,
+        vx: -Math.cos(ma) * 60 + (Math.random() * 40 - 20), vy: -Math.sin(ma) * 60 + (Math.random() * 40 - 20),
+        life: 0.25, max: 0.25, color: "#ffb45e", size: 2.4 });
+    }
+  }
+  // 粒子
+  for (i = particles.length - 1; i >= 0; i--) {
+    var pt = particles[i];
+    pt.life -= dt;
+    if (pt.life <= 0) { particles.splice(i, 1); continue; }
+    pt.x += pt.vx * dt; pt.y += pt.vy * dt; pt.vy += 140 * dt;
+    ctx.globalAlpha = Math.max(0, pt.life / pt.max);
+    ctx.fillStyle = pt.color;
+    ctx.fillRect(pt.x - pt.size / 2, pt.y - pt.size / 2, pt.size, pt.size);
+  }
+  ctx.globalAlpha = 1;
+  // 冲击环
+  for (i = rings.length - 1; i >= 0; i--) {
+    var rg = rings[i];
+    rg.life -= dt; rg.r += 340 * dt;
+    if (rg.life <= 0) { rings.splice(i, 1); continue; }
+    ctx.globalAlpha = Math.max(0, rg.life / 0.55) * 0.8;
+    ctx.strokeStyle = "#ffd76a"; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(rg.x, rg.y, rg.r, 0, Math.PI * 2); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  // 玩家（喷气人）
+  var px = C.PX + Math.sin(uiTime * 2.1) * 2;
+  var psy = demo ? H * 0.5 + Math.sin(uiTime * 1.4) * 16 : st.sy;
+  var pj = demo ? (Math.sin(uiTime * 2.4) > 0.35) : st.thrusting;
+  var psv = demo ? Math.cos(uiTime * 1.4) * 40 : st.sv;
+  var blinkP = (!demo && st.invuln > 0 && Math.sin(uiTime * 30) > 0) ? 0.35 : 1;
+  ctx.save();
+  ctx.translate(px, psy);
+  ctx.rotate(JD.clamp(psv / 900, -0.3, 0.3));
+  ctx.globalAlpha = blinkP;
+  if (pj) { // 喷气火焰
+    var fl = 12 + Math.random() * 10;
+    ctx.shadowColor = "#ffb45e"; ctx.shadowBlur = 12;
+    var fg = ctx.createLinearGradient(0, 10, 0, 10 + fl);
+    fg.addColorStop(0, "#fff3c0"); fg.addColorStop(0.5, "#ffb45e"); fg.addColorStop(1, "rgba(255,90,60,0)");
+    ctx.fillStyle = fg;
+    ctx.beginPath(); ctx.moveTo(-4, 10); ctx.lineTo(4, 10); ctx.lineTo(0, 10 + fl); ctx.closePath(); ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+  ctx.fillStyle = "#46527a"; // 背包
+  ctx.fillRect(-8, -2, 16, 13);
+  ctx.fillStyle = "#5d6b99"; ctx.fillRect(-8, -2, 16, 4);
+  var bg2 = ctx.createLinearGradient(0, -12, 0, 8); // 身体
+  bg2.addColorStop(0, "#e8ecf8"); bg2.addColorStop(1, "#aab4d4");
+  ctx.fillStyle = bg2;
+  ctx.beginPath();
+  ctx.moveTo(-6, 9); ctx.lineTo(-6, -6); ctx.quadraticCurveTo(-6, -11, 0, -11);
+  ctx.quadraticCurveTo(6, -11, 6, -6); ctx.lineTo(6, 9); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "#20283f"; // 头盔面罩
+  ctx.beginPath(); ctx.arc(0, -11, 6.4, Math.PI * 1.05, Math.PI * 1.95); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "#7ee0ff";
+  ctx.beginPath(); ctx.arc(1.2, -12.2, 2.6, 0, Math.PI * 2); ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.restore();
+  if (!demo && st.shield) { // 护盾泡
+    ctx.strokeStyle = "rgba(94,224,255," + (0.55 + 0.3 * Math.sin(uiTime * 6)) + ")";
+    ctx.lineWidth = 2.5; ctx.shadowColor = "#35e0ff"; ctx.shadowBlur = 10;
+    ctx.beginPath(); ctx.arc(px, psy, 23, 0, Math.PI * 2); ctx.stroke();
+    ctx.shadowBlur = 0;
+  }
+  // 喷气火焰粒子（游戏中按住时）
+  if (!demo && pj && !st.dead && Math.random() < 0.9) {
+    particles.push({ x: px + (Math.random() * 8 - 4), y: psy + 13, vx: (Math.random() * 60 - 30),
+      vy: 130 + Math.random() * 110, life: 0.3, max: 0.3,
+      color: Math.random() < 0.6 ? "#ffb45e" : "#fff3c0", size: 2.6 });
+  }
+  // 浮动文字
+  for (i = floats.length - 1; i >= 0; i--) {
+    var fl2 = floats[i];
+    fl2.life -= dt; fl2.y -= 42 * dt;
+    if (fl2.life <= 0) { floats.splice(i, 1); continue; }
+    ctx.globalAlpha = Math.min(1, fl2.life / 0.4);
+    ctx.fillStyle = fl2.color; ctx.font = "800 15px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText(fl2.text, fl2.x, fl2.y);
+  }
+  ctx.globalAlpha = 1;
+  // 巷道边界轨
+  ctx.fillStyle = "rgba(126,224,255,.20)";
+  ctx.fillRect(0, C.TOP - 3, W, 2); ctx.fillRect(0, C.BOT + 1, W, 2);
+  // 慢动作色调偏移
+  if (st.slowmo > 0 && !demo) {
+    ctx.fillStyle = "rgba(90,150,255," + (0.13 * Math.min(1, st.slowmo / 0.2)) + ")";
+    ctx.fillRect(0, 0, W, H);
+  }
+  ctx.fillStyle = vig; ctx.fillRect(0, 0, W, H);
+  // HUD
+  if (!demo) {
+    ctx.textAlign = "center"; ctx.textBaseline = "top";
+    ctx.fillStyle = "#fff"; ctx.font = "900 34px -apple-system,'Segoe UI',Arial,sans-serif";
+    ctx.fillText(String(st.score), W / 2, 14);
+    ctx.fillStyle = st.shield ? "#5ee0ff" : "rgba(255,255,255,.35)";
+    ctx.font = "700 11px sans-serif";
+    ctx.fillText(Math.floor(st.dist / C.PX_PER_M) + "m", W / 2, 52);
+    ctx.textAlign = "left";
+    ctx.fillStyle = "#8a96bc"; ctx.font = "700 12px sans-serif";
+    ctx.fillText("BEST " + best, 12, 14);
+    if (st.shield) {
+      ctx.fillStyle = "#5ee0ff"; ctx.font = "800 11px sans-serif";
+      ctx.fillText("SHIELD", 12, 32);
+    }
+    ctx.textAlign = "right";
+    ctx.fillStyle = "#5b678c"; ctx.font = "700 11px sans-serif";
+    ctx.fillText("NEAR x" + st.nearCount, W - 12, 40);
+  }
+}
+
+/* ---- 主循环 ---- */
+var last = performance.now();
+function frame(t) {
+  var dtR = Math.min((t - last) / 1000, 1 / 30);
+  last = t;
+  uiTime += dtR;
+  if (shakeT > 0) shakeT = Math.max(0, shakeT - dtR);
+  var scrollSrc = uiTime * 46;
+  if (state === "play" || state === "over") {
+    var scale = st.slowmo > 0 ? 0.35 : 1; // near-miss 慢动作
+    var thrust = held() && state === "play" && !st.dead;
+    JD.step(st, { thrust: thrust }, dtR * scale, dtR);
+    drainEvents();
+    setJet(thrust);
+    scrollSrc = st.dist;
+    // 导弹警报节拍
+    if (st.missiles.length > 0) {
+      alarmT -= dtR;
+      if (alarmT <= 0) { beep(940, 0.07, "square", 0.06); alarmT = 0.26; }
+    }
+    if (st.score > best && !beatBest && best > 0) {
+      beatBest = true;
+      floatText(W / 2, H * 0.3, "NEW BEST!", "#7effb0");
+      beep(1046, 0.12, "triangle", 0.1, 1568);
+    }
+    if (state === "over" && !overlayShown && st.deadT > 0.65) {
+      overlayShown = true;
+      showOverPanel();
+    }
+  }
+  render(scrollSrc, state === "ready", dtR);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ---- 调试/测试钩子（不影响游戏逻辑） ---- */
+window.__jd = {
+  get state() { return state; },
+  get st() { return st; },
+  get held() { return held(); },
+  JD: JD
+};
+</script>
+</body>
+</html>
